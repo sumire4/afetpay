@@ -14,7 +14,7 @@ AfetPay, doğal afet ve olağanüstü hal senaryolarında kesintisiz finansal er
 
 *   **Framework:** Flutter (Dart)
 *   **İletişim:** NFC (Near Field Communication)
-*   **Güvenlik:** Ed25519 Şifreleme
+*   **Güvenlik:** Ed25519 Şifrelemesi
 *   **Yerel Depolama:** Shared Preferences & Local Persistence
 
 ## Kurulum
