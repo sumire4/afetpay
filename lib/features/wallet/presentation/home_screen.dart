@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:afetpay/features/auth/presentation/login_screen.dart';
@@ -6,6 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:nfc_manager/nfc_manager.dart';
 import 'package:afetpay/features/wallet/presentation/about_screen.dart';
+import 'package:afetpay/core/wallet_service.dart';
+import 'package:afetpay/core/nfc_service.dart';
+import 'package:uuid/uuid.dart';
 
 const _kPrimary = Color(0xFF64819A);
 const _kOnPrimary = Color(0xFFFFFFFF);
@@ -19,6 +23,7 @@ const _kOutline = Color(0xFFB0C4D8);
 const _kOnSurface = Color(0xFF1A2533);
 const _kOnSurfaceVariant = Color(0xFF4A5E72);
 
+// TransactionItem — UI display model (wraps TransactionRecord)
 class TransactionItem {
   final String id;
   final String name;
@@ -35,9 +40,20 @@ class TransactionItem {
     required this.time,
     required this.note,
   });
+
+  factory TransactionItem.fromRecord(TransactionRecord r) => TransactionItem(
+        id: r.id,
+        name: r.name,
+        amount: r.amount,
+        isSent: r.isSent,
+        time: r.time,
+        note: r.note,
+      );
 }
 
-/// Transfer yöntemi seçim modalı — NFC veya QR
+enum TransferMethod { nfc, qr }
+
+/// Transfer yöntemi seçim modalı
 class _TransferMethodSheet extends StatelessWidget {
   final bool isSend;
 
@@ -57,7 +73,6 @@ class _TransferMethodSheet extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Handle bar
           Container(
             width: 40,
             height: 4,
@@ -76,18 +91,14 @@ class _TransferMethodSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          Text(
+          const Text(
             'Karşı tarafla nasıl transfer yapmak istersiniz?',
             textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: _kOnSurfaceVariant,
-              fontSize: 13,
-            ),
+            style: TextStyle(color: _kOnSurfaceVariant, fontSize: 13),
           ),
           const SizedBox(height: 28),
           Row(
             children: [
-              // NFC seçeneği
               Expanded(
                 child: _MethodCard(
                   icon: Icons.nfc_rounded,
@@ -111,13 +122,14 @@ class _TransferMethodSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 14),
-              // QR seçeneği
               Expanded(
                 child: _MethodCard(
                   icon: Icons.qr_code_2_rounded,
                   title: 'QR Kod',
                   subtitle: 'Kodu tara\nveya göster',
-                  color: actionColor == _kPrimary ? const Color(0xFF5C6BC0) : _kSecondary,
+                  color: actionColor == _kPrimary
+                      ? const Color(0xFF5C6BC0)
+                      : _kSecondary,
                   badge: 'Kolay',
                   onTap: () {
                     HapticFeedback.mediumImpact();
@@ -200,7 +212,8 @@ class _MethodCard extends StatelessWidget {
                   child: Icon(icon, color: color, size: 26),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     color: color,
                     borderRadius: BorderRadius.circular(20),
@@ -241,7 +254,9 @@ class _MethodCard extends StatelessWidget {
   }
 }
 
-enum TransferMethod { nfc, qr }
+// ─────────────────────────────────────────────
+// HomeScreen
+// ─────────────────────────────────────────────
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -256,47 +271,15 @@ class _HomeScreenState extends State<HomeScreen>
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
-  int _selectedIndex = 0;
-  final double _balance = 1250.75;
-  final String _userName = 'Mete Gedik';
-  final String _walletId = 'AY•4821';
+  // Wallet state — loaded from SharedPreferences
+  double _balance = 0;
+  String _userName = '';
+  String _walletId = '';
+  List<TransactionItem> _transactions = [];
+  bool _isLoading = true;
+
   bool _isOffline = false;
   late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
-
-  final List<TransactionItem> _transactions = [
-    TransactionItem(
-      id: 'tx001',
-      name: 'Fatma K.',
-      amount: 150.0,
-      isSent: false,
-      time: DateTime.now().subtract(const Duration(minutes: 12)),
-      note: 'NFC ile alındı',
-    ),
-    TransactionItem(
-      id: 'tx002',
-      name: 'Mehmet A.',
-      amount: 75.50,
-      isSent: true,
-      time: DateTime.now().subtract(const Duration(hours: 1)),
-      note: 'Market alışverişi',
-    ),
-    TransactionItem(
-      id: 'tx003',
-      name: 'Zeynep D.',
-      amount: 300.0,
-      isSent: false,
-      time: DateTime.now().subtract(const Duration(hours: 3)),
-      note: 'NFC ile alındı',
-    ),
-    TransactionItem(
-      id: 'tx004',
-      name: 'Hasan B.',
-      amount: 50.0,
-      isSent: true,
-      time: DateTime.now().subtract(const Duration(hours: 5)),
-      note: 'İlaç',
-    ),
-  ];
 
   @override
   void initState() {
@@ -309,7 +292,37 @@ class _HomeScreenState extends State<HomeScreen>
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
     _initConnectivity();
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
+    _connectivitySubscription =
+        Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
+    _loadWalletData();
+  }
+
+  Future<void> _loadWalletData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final balance = await WalletService.instance.loadBalance();
+    final records = await WalletService.instance.loadTransactions();
+    final userName = prefs.getString('user_name') ?? 'Kullanıcı';
+    final walletId = prefs.getString('wallet_id') ?? 'AY•0000';
+    if (!mounted) return;
+    setState(() {
+      _balance = balance;
+      _userName = userName;
+      _walletId = walletId;
+      _transactions =
+          records.map((r) => TransactionItem.fromRecord(r)).toList();
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _refreshWalletData() async {
+    final balance = await WalletService.instance.loadBalance();
+    final records = await WalletService.instance.loadTransactions();
+    if (!mounted) return;
+    setState(() {
+      _balance = balance;
+      _transactions =
+          records.map((r) => TransactionItem.fromRecord(r)).toList();
+    });
   }
 
   Future<void> _initConnectivity() async {
@@ -319,15 +332,14 @@ class _HomeScreenState extends State<HomeScreen>
     } on PlatformException catch (_) {
       return;
     }
-    if (!mounted) {
-      return;
-    }
-    return _updateConnectionStatus(result);
+    if (!mounted) return;
+    _updateConnectionStatus(result);
   }
 
   void _updateConnectionStatus(List<ConnectivityResult> result) {
     setState(() {
-      _isOffline = result.contains(ConnectivityResult.none) || result.isEmpty;
+      _isOffline =
+          result.contains(ConnectivityResult.none) || result.isEmpty;
     });
   }
 
@@ -345,72 +357,92 @@ class _HomeScreenState extends State<HomeScreen>
     return '${diff.inDays} gün önce';
   }
 
+  String _formatBalance(double v) {
+    final parts = v.toStringAsFixed(2).split('.');
+    final intPart = parts[0]
+        .replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+$)'), (m) => '${m[1]}.');
+    return '$intPart,${parts[1]}';
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        backgroundColor: _kSurface,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _kSurface,
-      body: IndexedStack(
-        index: _selectedIndex,
-        children: [
-          SafeArea(
-            child: CustomScrollView(
-              slivers: [
-                SliverToBoxAdapter(child: _buildAppBar()),
-                if (_isOffline)
-                  SliverToBoxAdapter(child: _buildOfflineBanner()),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                    child: _buildBalanceCard(),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-                    child: _buildActionButtons(),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 28, 16, 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Son İşlemler',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            color: _kOnSurface,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: () {},
-                          child: const Text('Tümü',
-                              style: TextStyle(color: _kPrimary)),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                        (context, index) {
-                      final tx = _transactions[index];
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 4),
-                        child: _buildTransactionTile(tx),
-                      );
-                    },
-                    childCount: _transactions.length,
-                  ),
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: 20)),
-              ],
+      body: SafeArea(
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(child: _buildAppBar()),
+            if (_isOffline)
+              SliverToBoxAdapter(child: _buildOfflineBanner()),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: _buildBalanceCard(),
+              ),
             ),
-          ),
-          const AboutScreen(),
-        ],
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+                child: _buildActionButtons(),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 28, 16, 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Son İşlemler',
+                      style:
+                          Theme.of(context).textTheme.titleMedium?.copyWith(
+                                color: _kOnSurface,
+                                fontWeight: FontWeight.w600,
+                              ),
+                    ),
+                    TextButton(
+                      onPressed: () {},
+                      child: const Text('Tümü',
+                          style: TextStyle(color: _kPrimary)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_transactions.isEmpty)
+              const SliverToBoxAdapter(
+                child: Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Text('Henüz işlem yok.',
+                        style: TextStyle(color: _kOnSurfaceVariant)),
+                  ),
+                ),
+              )
+            else
+              SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final tx = _transactions[index];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 4),
+                      child: _buildTransactionTile(tx),
+                    );
+                  },
+                  childCount: _transactions.length,
+                ),
+              ),
+            const SliverToBoxAdapter(child: SizedBox(height: 20)),
+          ],
+        ),
       ),
     );
   }
@@ -439,12 +471,10 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           IconButton(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const AboutScreen()),
-              );
-            },
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => const AboutScreen()),
+            ),
             icon: const Icon(Icons.info_outline_rounded),
             color: _kOnSurfaceVariant,
           ),
@@ -468,7 +498,8 @@ class _HomeScreenState extends State<HomeScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 40, height: 4,
+              width: 40,
+              height: 4,
               decoration: BoxDecoration(
                 color: Colors.grey.shade300,
                 borderRadius: BorderRadius.circular(2),
@@ -476,7 +507,8 @@ class _HomeScreenState extends State<HomeScreen>
             ),
             const SizedBox(height: 32),
             Container(
-              width: 80, height: 80,
+              width: 80,
+              height: 80,
               decoration: BoxDecoration(
                 color: _kPrimary.withOpacity(0.1),
                 shape: BoxShape.circle,
@@ -484,18 +516,19 @@ class _HomeScreenState extends State<HomeScreen>
               child: const Icon(Icons.person, size: 40, color: _kPrimary),
             ),
             const SizedBox(height: 16),
-            const Text(
-              'Mete Gedik',
-              style: TextStyle(
+            Text(
+              _userName,
+              style: const TextStyle(
                 fontSize: 22,
                 fontWeight: FontWeight.bold,
                 color: _kOnSurface,
               ),
             ),
             const SizedBox(height: 4),
-            const Text(
-              'Cüzdan No: AY•4821',
-              style: TextStyle(color: _kOnSurfaceVariant, fontSize: 14),
+            Text(
+              'Cüzdan No: $_walletId',
+              style:
+                  const TextStyle(color: _kOnSurfaceVariant, fontSize: 14),
             ),
             const SizedBox(height: 32),
             SizedBox(
@@ -514,7 +547,8 @@ class _HomeScreenState extends State<HomeScreen>
                 icon: const Icon(Icons.logout_rounded, color: _kError),
                 label: const Text(
                   'Çıkış Yap',
-                  style: TextStyle(color: _kError, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                      color: _kError, fontWeight: FontWeight.bold),
                 ),
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
@@ -542,16 +576,17 @@ class _HomeScreenState extends State<HomeScreen>
             color: const Color(0xFFFFF3CD),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: const Color(0xFFFFB300).withOpacity(_pulseAnimation.value),
+              color:
+                  const Color(0xFFFFB300).withOpacity(_pulseAnimation.value),
               width: 1.5,
             ),
           ),
-          child: Row(
+          child: const Row(
             children: [
-              const Icon(Icons.wifi_off_rounded,
+              Icon(Icons.wifi_off_rounded,
                   size: 18, color: Color(0xFF7B5800)),
-              const SizedBox(width: 10),
-              const Expanded(
+              SizedBox(width: 10),
+              Expanded(
                 child: Text(
                   'Çevrimdışı görünüyorsunuz — NFC transferi aktif',
                   style: TextStyle(
@@ -600,7 +635,8 @@ class _HomeScreenState extends State<HomeScreen>
                   const SizedBox(width: 6),
                   Text(
                     'Cüzdan $_walletId',
-                    style: const TextStyle(color: Colors.white60, fontSize: 13),
+                    style:
+                        const TextStyle(color: Colors.white60, fontSize: 13),
                   ),
                 ],
               ),
@@ -624,40 +660,41 @@ class _HomeScreenState extends State<HomeScreen>
             duration: const Duration(milliseconds: 300),
             child: _balanceVisible
                 ? Row(
-              key: const ValueKey('visible'),
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Text('₺',
-                      style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w500)),
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  '1.250,75',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 42,
-                    fontWeight: FontWeight.bold,
-                    height: 1.0,
-                    letterSpacing: -1,
-                  ),
-                ),
-              ],
-            )
+                    key: const ValueKey('visible'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text('₺',
+                            style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w500)),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _formatBalance(_balance),
+                        key: ValueKey(_balance),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 42,
+                          fontWeight: FontWeight.bold,
+                          height: 1.0,
+                          letterSpacing: -1,
+                        ),
+                      ),
+                    ],
+                  )
                 : const Text(
-              key: ValueKey('hidden'),
-              '••••••',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 42,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 4,
-              ),
-            ),
+                    key: ValueKey('hidden'),
+                    '••••••',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 42,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 4,
+                    ),
+                  ),
           ),
           const SizedBox(height: 6),
           const Text('Kullanılabilir Bakiye',
@@ -665,7 +702,7 @@ class _HomeScreenState extends State<HomeScreen>
           const SizedBox(height: 20),
           Container(
             padding:
-            const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(0.12),
               borderRadius: BorderRadius.circular(20),
@@ -699,7 +736,7 @@ class _HomeScreenState extends State<HomeScreen>
             icon: Icons.arrow_upward,
             label: 'Gönder',
             color: _kPrimary,
-            onTap: () => _showMethodSelectionSheet(context, isSend: true),
+            onTap: () => _openTransferSheet(isSend: true),
           ),
         ),
         const SizedBox(width: 12),
@@ -707,8 +744,8 @@ class _HomeScreenState extends State<HomeScreen>
           child: _ActionButton(
             icon: Icons.arrow_downward,
             label: 'Al',
-            color: _kPrimary,
-            onTap: () => _showMethodSelectionSheet(context, isSend: false),
+            color: _kSecondary,
+            onTap: () => _openTransferSheet(isSend: false),
           ),
         ),
         const SizedBox(width: 12),
@@ -717,11 +754,20 @@ class _HomeScreenState extends State<HomeScreen>
             icon: Icons.history,
             label: 'Geçmiş',
             color: _kOnSurfaceVariant,
-            onTap: () {},
+            onTap: _refreshWalletData,
           ),
         ),
       ],
     );
+  }
+
+  void _openTransferSheet({required bool isSend}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _TransferMethodSheet(isSend: isSend),
+    ).then((_) => _refreshWalletData());
   }
 
   Widget _buildTransactionTile(TransactionItem tx) {
@@ -769,9 +815,13 @@ class _HomeScreenState extends State<HomeScreen>
                     const Icon(Icons.nfc_rounded,
                         size: 12, color: _kOnSurfaceVariant),
                     const SizedBox(width: 4),
-                    Text(tx.note,
-                        style: const TextStyle(
-                            fontSize: 12, color: _kOnSurfaceVariant)),
+                    Expanded(
+                      child: Text(tx.note,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 12, color: _kOnSurfaceVariant)),
+                    ),
                   ],
                 ),
               ],
@@ -800,17 +850,11 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
-
-  /// Yöntem seçim modal'ını göster
-  void _showMethodSelectionSheet(BuildContext context, {required bool isSend}) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => _TransferMethodSheet(isSend: isSend),
-    );
-  }
 }
+
+// ─────────────────────────────────────────────
+// Action Button
+// ─────────────────────────────────────────────
 
 class _ActionButton extends StatelessWidget {
   final IconData icon;
@@ -867,125 +911,9 @@ class _ActionButton extends StatelessWidget {
   }
 }
 
-class _NfcSheet extends StatefulWidget {
-  const _NfcSheet();
-
-  @override
-  State<_NfcSheet> createState() => _NfcSheetState();
-}
-
-class _NfcSheetState extends State<_NfcSheet>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _ripple;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    )..repeat();
-    _ripple = CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 40),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade300,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Text(
-            'NFC Transferi',
-            style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: _kOnSurface),
-          ),
-          const SizedBox(height: 6),
-          const Text('Telefonları yaklaştırın',
-              style: TextStyle(color: _kOnSurfaceVariant, fontSize: 14)),
-          const SizedBox(height: 36),
-          SizedBox(
-            width: 160,
-            height: 160,
-            child: AnimatedBuilder(
-              animation: _ripple,
-              builder: (_, __) => Stack(
-                alignment: Alignment.center,
-                children: [
-                  for (final factor in [0.4, 0.65, 0.9])
-                    Opacity(
-                      opacity:
-                      (1.0 - ((_ripple.value - factor).abs() % 1.0))
-                          .clamp(0.0, 0.5),
-                      child: Container(
-                        width: 160 * factor,
-                        height: 160 * factor,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: _kPrimary, width: 2),
-                        ),
-                      ),
-                    ),
-                  Container(
-                    width: 72,
-                    height: 72,
-                    decoration: const BoxDecoration(
-                      color: _kPrimary,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.nfc_rounded,
-                        color: Colors.white, size: 36),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 32),
-          const Text(
-            'Cihazlar birbirine değdiğinde\ntransfer otomatik başlar',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: _kOnSurfaceVariant, fontSize: 13),
-          ),
-          const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              onPressed: () => Navigator.pop(context),
-              style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14)),
-              ),
-              child: const Text('İptal'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+// ─────────────────────────────────────────────
+// Transfer Sheet (NFC send / receive)
+// ─────────────────────────────────────────────
 
 class _TransferSheet extends StatefulWidget {
   final bool isSend;
@@ -1001,8 +929,8 @@ class _TransferSheetState extends State<_TransferSheet>
     with SingleTickerProviderStateMixin {
   final _amountCtrl = TextEditingController();
   final _noteCtrl = TextEditingController();
+  bool _nfcActive = false;
 
-  // NFC ripple animation
   late AnimationController _nfcCtrl;
   late Animation<double> _nfcRipple;
 
@@ -1021,48 +949,172 @@ class _TransferSheetState extends State<_TransferSheet>
     _amountCtrl.dispose();
     _noteCtrl.dispose();
     _nfcCtrl.dispose();
+    // NFC session kapatılmadan kapanırsa güvenli sonlandır
+    NfcManager.instance.stopSession().catchError((_) {});
     super.dispose();
   }
 
   bool get _isNfc => widget.method == TransferMethod.nfc;
   bool get _isQr => widget.method == TransferMethod.qr;
 
-  Future<void> _handleNfcTransfer() async {
+  // ── GÖNDER ──────────────────────────────────
+  Future<void> _handleNfcSend() async {
     final amountText = _amountCtrl.text.replaceAll(',', '.');
     final amount = double.tryParse(amountText) ?? 0.0;
-    
-    if (amount <= 0 && widget.isSend) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Lütfen geçerli bir tutar girin')),
-      );
+
+    if (amount <= 0) {
+      _showSnack('Lütfen geçerli bir tutar girin');
       return;
     }
 
-    try {
-      bool isAvailable = await NfcManager.instance.isAvailable();
-      if (!isAvailable) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('NFC bu cihazda desteklenmiyor veya kapalı.')),
-        );
-        return;
-      }
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cihazınızı diğer cihaza yaklaştırın...')),
-      );
-
-      NfcManager.instance.startSession(
-        onDiscovered: (NfcTag tag) async {
-          NfcManager.instance.stopSession();
-          _showSuccessDialog(amount);
-        },
-      );
-    } catch (e) {
-      NfcManager.instance.stopSession();
+    final balance = await WalletService.instance.loadBalance();
+    if (amount > balance) {
+      _showSnack('Yetersiz bakiye — mevcut: ₺${balance.toStringAsFixed(2)}');
+      return;
     }
+
+    final isAvailable = await NfcManager.instance.isAvailable();
+    if (!isAvailable) {
+      _showSnack('NFC bu cihazda desteklenmiyor veya kapalı');
+      return;
+    }
+
+    final txId = const Uuid().v4();
+    final walletId =
+        (await SharedPreferences.getInstance()).getString('wallet_id') ??
+            'AY•0000';
+    final note =
+        _noteCtrl.text.trim().isEmpty ? 'NFC Transferi' : _noteCtrl.text.trim();
+
+    final ndefMsg = NfcService.buildTransferMessage(
+      amount: amount,
+      txId: txId,
+      fromWalletId: walletId,
+      note: note,
+    );
+
+    setState(() => _nfcActive = true);
+    _showSnack('Cihazınızı NFC tag\'e/karta yaklaştırın...');
+
+    NfcManager.instance.startSession(
+      onDiscovered: (NfcTag tag) async {
+        try {
+          final ndef = Ndef.from(tag);
+          if (ndef == null || !ndef.isWritable) {
+            await NfcManager.instance.stopSession(errorMessage: 'Tag yazılabilir değil');
+            if (!mounted) return;
+            setState(() => _nfcActive = false);
+            _showSnack('NFC tag yazılabilir değil, farklı bir tag deneyin');
+            return;
+          }
+          await ndef.write(ndefMsg);
+          await NfcManager.instance.stopSession();
+
+          // Bakiyeyi düşür ve işlemi kaydet
+          final newBalance = balance - amount;
+          await WalletService.instance.saveBalance(newBalance);
+          await WalletService.instance.addTransaction(TransactionRecord(
+            id: txId,
+            name: 'NFC Transferi',
+            amount: amount,
+            isSent: true,
+            time: DateTime.now(),
+            note: note,
+          ));
+          await WalletService.instance.markProcessed(txId);
+
+          if (!mounted) return;
+          setState(() => _nfcActive = false);
+          _showSuccessDialog(amount);
+        } catch (e) {
+          await NfcManager.instance.stopSession(errorMessage: 'Yazma hatası');
+          if (!mounted) return;
+          setState(() => _nfcActive = false);
+          _showSnack('NFC yazma hatası: $e');
+        }
+      },
+    );
+  }
+
+  // ── AL ──────────────────────────────────────
+  Future<void> _handleNfcReceive() async {
+    final isAvailable = await NfcManager.instance.isAvailable();
+    if (!isAvailable) {
+      _showSnack('NFC bu cihazda desteklenmiyor veya kapalı');
+      return;
+    }
+
+    setState(() => _nfcActive = true);
+    _showSnack('Cihazınızı NFC tag\'e/karta yaklaştırın...');
+
+    NfcManager.instance.startSession(
+      onDiscovered: (NfcTag tag) async {
+        try {
+          final ndef = Ndef.from(tag);
+          if (ndef == null) {
+            await NfcManager.instance.stopSession(errorMessage: 'NDEF desteklenmiyor');
+            if (!mounted) return;
+            setState(() => _nfcActive = false);
+            _showSnack('Bu tag AfetPay transferi içermiyor');
+            return;
+          }
+
+          final message = await ndef.read();
+          final params = NfcService.parseTransferMessage(message);
+
+          if (params == null) {
+            await NfcManager.instance.stopSession(errorMessage: 'Geçersiz mesaj');
+            if (!mounted) return;
+            setState(() => _nfcActive = false);
+            _showSnack('Bu tag AfetPay transfer verisi içermiyor');
+            return;
+          }
+
+          final txId = params['txId']!;
+          final amount = double.tryParse(params['amount']!) ?? 0.0;
+          final fromId = params['from'] ?? 'Bilinmeyen';
+          final note = params['note'] ?? 'NFC ile alındı';
+
+          // Çift işlem koruması
+          if (await WalletService.instance.isAlreadyProcessed(txId)) {
+            await NfcManager.instance.stopSession();
+            if (!mounted) return;
+            setState(() => _nfcActive = false);
+            _showSnack('Bu transfer zaten işlendi');
+            return;
+          }
+
+          final oldBalance = await WalletService.instance.loadBalance();
+          final newBalance = oldBalance + amount;
+          await WalletService.instance.saveBalance(newBalance);
+          await WalletService.instance.addTransaction(TransactionRecord(
+            id: txId,
+            name: fromId,
+            amount: amount,
+            isSent: false,
+            time: DateTime.now(),
+            note: note,
+          ));
+          await WalletService.instance.markProcessed(txId);
+          await NfcManager.instance.stopSession();
+
+          if (!mounted) return;
+          setState(() => _nfcActive = false);
+          _showSuccessDialog(amount);
+        } catch (e) {
+          await NfcManager.instance.stopSession(errorMessage: 'Okuma hatası');
+          if (!mounted) return;
+          setState(() => _nfcActive = false);
+          _showSnack('NFC okuma hatası: $e');
+        }
+      },
+    );
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg)));
   }
 
   void _showSuccessDialog(double amount) {
@@ -1080,16 +1132,17 @@ class _TransferSheetState extends State<_TransferSheet>
                 color: Colors.green.withOpacity(0.2),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.check_circle_rounded, color: Colors.green),
+              child: const Icon(Icons.check_circle_rounded,
+                  color: Colors.green),
             ),
             const SizedBox(width: 12),
             const Text('Başarılı'),
           ],
         ),
         content: Text(
-          widget.isSend 
-              ? '₺${amount.toStringAsFixed(2)} tutarındaki transferiniz başarıyla karşı cihaza aktarıldı.'
-              : 'Karşı cihazdan ₺${amount.toStringAsFixed(2)} başarıyla alındı.',
+          widget.isSend
+              ? '₺${amount.toStringAsFixed(2)} başarıyla gönderildi.\nBakiyenizden düşüldü.'
+              : '₺${amount.toStringAsFixed(2)} başarıyla alındı.\nBakiyenize eklendi.',
           style: const TextStyle(fontSize: 15),
         ),
         actions: [
@@ -1105,13 +1158,14 @@ class _TransferSheetState extends State<_TransferSheet>
   @override
   Widget build(BuildContext context) {
     final color = widget.isSend ? _kPrimary : _kSecondary;
-    final qrColor = widget.isSend ? const Color(0xFF5C6BC0) : _kSecondary;
+    final qrColor =
+        widget.isSend ? const Color(0xFF5C6BC0) : _kSecondary;
     final activeColor = _isNfc ? color : qrColor;
     final label = widget.isSend ? 'Gönder' : 'Al';
 
     return Padding(
       padding:
-      EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 36),
         decoration: const BoxDecoration(
@@ -1122,7 +1176,6 @@ class _TransferSheetState extends State<_TransferSheet>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Handle bar
             Center(
               child: Container(
                 width: 40,
@@ -1134,7 +1187,6 @@ class _TransferSheetState extends State<_TransferSheet>
               ),
             ),
             const SizedBox(height: 20),
-            // Başlık + method badge
             Row(
               children: [
                 Text(
@@ -1146,17 +1198,21 @@ class _TransferSheetState extends State<_TransferSheet>
                 ),
                 const SizedBox(width: 10),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: activeColor.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: activeColor.withOpacity(0.3)),
+                    border:
+                        Border.all(color: activeColor.withOpacity(0.3)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        _isNfc ? Icons.nfc_rounded : Icons.qr_code_2_rounded,
+                        _isNfc
+                            ? Icons.nfc_rounded
+                            : Icons.qr_code_2_rounded,
                         size: 13,
                         color: activeColor,
                       ),
@@ -1175,62 +1231,65 @@ class _TransferSheetState extends State<_TransferSheet>
               ],
             ),
             const SizedBox(height: 20),
-            // Tutar alanı
-            TextField(
-              controller: _amountCtrl,
-              keyboardType:
-              const TextInputType.numberWithOptions(decimal: true),
-              style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                  color: _kOnSurface),
-              decoration: InputDecoration(
-                prefixText: '₺ ',
-                prefixStyle: TextStyle(
+
+            // Tutar
+            if (widget.isSend || _isQr) ...[
+              TextField(
+                controller: _amountCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                style: const TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
-                    color: activeColor),
-                hintText: '0,00',
-                hintStyle: TextStyle(
-                    color: Colors.grey.shade400,
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold),
-                filled: true,
-                fillColor: activeColor.withOpacity(0.05),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide:
-                  BorderSide(color: activeColor.withOpacity(0.3)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide:
-                  BorderSide(color: activeColor.withOpacity(0.2)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: BorderSide(color: activeColor, width: 1.5),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            // Not alanı
-            TextField(
-              controller: _noteCtrl,
-              decoration: InputDecoration(
-                hintText: 'Not ekle (isteğe bağlı)',
-                hintStyle: TextStyle(color: Colors.grey.shade400),
-                filled: true,
-                fillColor: _kSurfaceVariant,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
+                    color: _kOnSurface),
+                decoration: InputDecoration(
+                  prefixText: '₺ ',
+                  prefixStyle: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: activeColor),
+                  hintText: '0,00',
+                  hintStyle: TextStyle(
+                      color: Colors.grey.shade400,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold),
+                  filled: true,
+                  fillColor: activeColor.withOpacity(0.05),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide:
+                        BorderSide(color: activeColor.withOpacity(0.3)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide:
+                        BorderSide(color: activeColor.withOpacity(0.2)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide:
+                        BorderSide(color: activeColor, width: 1.5),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _noteCtrl,
+                decoration: InputDecoration(
+                  hintText: 'Not ekle (isteğe bağlı)',
+                  hintStyle: TextStyle(color: Colors.grey.shade400),
+                  filled: true,
+                  fillColor: _kSurfaceVariant,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
 
-            // --- NFC bölümü ---
+            // NFC bölümü
             if (_isNfc) ...[
               Container(
                 padding: const EdgeInsets.all(12),
@@ -1238,22 +1297,24 @@ class _TransferSheetState extends State<_TransferSheet>
                   color: _kPrimaryContainer,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
-                    Icon(Icons.info_outline_rounded,
+                    const Icon(Icons.info_outline_rounded,
                         size: 16, color: _kPrimary),
-                    SizedBox(width: 8),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Transfer NFC ile gerçekleşir, internet gerekmez',
-                        style: TextStyle(fontSize: 12, color: _kPrimary),
+                        widget.isSend
+                            ? 'Butona basın → NFC kart/tag\'e yaklaştırın → Tutar karşıya yazılır'
+                            : 'Butona basın → NFC kart/tag\'i okutun → Tutar bakiyenize eklenir',
+                        style: const TextStyle(
+                            fontSize: 12, color: _kPrimary),
                       ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 16),
-              // NFC ripple animasyonu (küçük versiyon)
               Center(
                 child: SizedBox(
                   width: 100,
@@ -1265,27 +1326,36 @@ class _TransferSheetState extends State<_TransferSheet>
                       children: [
                         for (final factor in [0.4, 0.65, 0.9])
                           Opacity(
-                            opacity: (1.0 -
-                                ((_nfcRipple.value - factor).abs() % 1.0))
-                                .clamp(0.0, 0.4),
+                            opacity: _nfcActive
+                                ? (1.0 -
+                                        ((_nfcRipple.value - factor).abs() %
+                                            1.0))
+                                    .clamp(0.0, 0.4)
+                                : 0.0,
                             child: Container(
                               width: 100 * factor,
                               height: 100 * factor,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                border: Border.all(color: _kPrimary, width: 1.5),
+                                border: Border.all(
+                                    color: _kPrimary, width: 1.5),
                               ),
                             ),
                           ),
                         Container(
                           width: 46,
                           height: 46,
-                          decoration: const BoxDecoration(
-                            color: _kPrimary,
+                          decoration: BoxDecoration(
+                            color: _nfcActive
+                                ? _kPrimary
+                                : _kPrimary.withOpacity(0.4),
                             shape: BoxShape.circle,
                           ),
-                          child: const Icon(Icons.nfc_rounded,
-                              color: Colors.white, size: 24),
+                          child: Icon(
+                            Icons.nfc_rounded,
+                            color: Colors.white,
+                            size: 24,
+                          ),
                         ),
                       ],
                     ),
@@ -1293,19 +1363,24 @@ class _TransferSheetState extends State<_TransferSheet>
                 ),
               ),
               const SizedBox(height: 8),
-              const Center(
+              Center(
                 child: Text(
-                  'Cihazları yaklaştırmaya hazır',
+                  _nfcActive
+                      ? 'NFC bekleniyor...'
+                      : 'Hazır — butona basın',
                   style: TextStyle(
                     fontSize: 12,
-                    color: _kOnSurfaceVariant,
+                    color: _nfcActive ? _kPrimary : _kOnSurfaceVariant,
+                    fontWeight: _nfcActive
+                        ? FontWeight.w600
+                        : FontWeight.normal,
                   ),
                 ),
               ),
               const SizedBox(height: 16),
             ],
 
-            // --- QR bölümü ---
+            // QR bölümü
             if (_isQr) ...[
               Container(
                 padding: const EdgeInsets.all(12),
@@ -1331,7 +1406,6 @@ class _TransferSheetState extends State<_TransferSheet>
                 ),
               ),
               const SizedBox(height: 16),
-              // QR kod placeholder
               Center(
                 child: Container(
                   width: 120,
@@ -1349,7 +1423,9 @@ class _TransferSheetState extends State<_TransferSheet>
                           size: 64, color: qrColor.withOpacity(0.7)),
                       const SizedBox(height: 4),
                       Text(
-                        widget.isSend ? 'Tarayıcı Açılıyor...' : 'QR Hazır',
+                        widget.isSend
+                            ? 'Tarayıcı Açılıyor...'
+                            : 'QR Hazır',
                         style: TextStyle(
                           fontSize: 10,
                           color: qrColor,
@@ -1363,20 +1439,27 @@ class _TransferSheetState extends State<_TransferSheet>
               const SizedBox(height: 16),
             ],
 
-            // Buton
+            // Ana buton
             SizedBox(
               width: double.infinity,
               child: FilledButton(
-                onPressed: () async {
-                  HapticFeedback.mediumImpact();
-                  if (_isNfc) {
-                    await _handleNfcTransfer();
-                  } else {
-                    Navigator.pop(context);
-                  }
-                },
+                onPressed: _nfcActive
+                    ? null
+                    : () async {
+                        HapticFeedback.mediumImpact();
+                        if (_isNfc) {
+                          if (widget.isSend) {
+                            await _handleNfcSend();
+                          } else {
+                            await _handleNfcReceive();
+                          }
+                        } else {
+                          Navigator.pop(context);
+                        }
+                      },
                 style: FilledButton.styleFrom(
                   backgroundColor: activeColor,
+                  disabledBackgroundColor: activeColor.withOpacity(0.5),
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14)),
@@ -1385,12 +1468,16 @@ class _TransferSheetState extends State<_TransferSheet>
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
-                      _isNfc ? Icons.nfc_rounded : Icons.qr_code_scanner_rounded,
+                      _isNfc
+                          ? Icons.nfc_rounded
+                          : Icons.qr_code_scanner_rounded,
                       size: 20,
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      _isNfc ? 'NFC ile $label' : 'QR ile $label',
+                      _nfcActive
+                          ? 'Bekleniyor...'
+                          : (_isNfc ? 'NFC ile $label' : 'QR ile $label'),
                       style: const TextStyle(
                           fontSize: 16, fontWeight: FontWeight.bold),
                     ),
@@ -1398,6 +1485,25 @@ class _TransferSheetState extends State<_TransferSheet>
                 ),
               ),
             ),
+
+            if (_nfcActive) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () {
+                    NfcManager.instance.stopSession();
+                    setState(() => _nfcActive = false);
+                  },
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
+                  ),
+                  child: const Text('İptal Et'),
+                ),
+              ),
+            ],
           ],
         ),
       ),

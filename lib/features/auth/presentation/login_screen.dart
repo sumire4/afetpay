@@ -29,9 +29,19 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    // Gerçek bir kontrol yok, yalandan giriş başarılı kabul et:
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_logged_in', true);
+
+    // Kullanıcı adı yoksa telefon numarasını kaydet
+    if (!prefs.containsKey('user_name')) {
+      await prefs.setString('user_name', _phoneCtrl.text.trim());
+    }
+    // Cüzdan ID yoksa üret (AY•XXXX format)
+    if (!prefs.containsKey('wallet_id')) {
+      final suffix = _phoneCtrl.text.replaceAll(RegExp(r'\D'), '');
+      final short = suffix.length >= 4 ? suffix.substring(suffix.length - 4) : suffix.padLeft(4, '0');
+      await prefs.setString('wallet_id', 'AY•$short');
+    }
 
     if (!mounted) return;
     Navigator.pushReplacement(
