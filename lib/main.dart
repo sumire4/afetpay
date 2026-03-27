@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'features/wallet/presentation/home_screen.dart';
+import 'features/auth/presentation/login_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  final prefs = await SharedPreferences.getInstance();
+  final isLoggedIn = prefs.getBool('is_logged_in') ?? false;
 
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -14,11 +19,13 @@ void main() {
 
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
-  runApp(const AfetPayApp());
+  runApp(AfetPayApp(isLoggedIn: isLoggedIn));
 }
 
 class AfetPayApp extends StatelessWidget {
-  const AfetPayApp({super.key});
+  final bool isLoggedIn;
+  
+  const AfetPayApp({super.key, required this.isLoggedIn});
 
   @override
   Widget build(BuildContext context) {
@@ -36,7 +43,7 @@ class AfetPayApp extends StatelessWidget {
           systemOverlayStyle: SystemUiOverlayStyle.dark,
         ),
       ),
-      home: const HomeScreen(),
+      home: isLoggedIn ? const HomeScreen() : const LoginScreen(),
     );
   }
 }

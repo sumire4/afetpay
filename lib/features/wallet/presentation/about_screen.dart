@@ -20,6 +20,12 @@ class AboutScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _kSurface,
+      appBar: AppBar(
+        backgroundColor: _kSurface,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        leading: const BackButton(color: _kOnSurface),
+      ),
       body: SafeArea(
         child: CustomScrollView(
           slivers: [

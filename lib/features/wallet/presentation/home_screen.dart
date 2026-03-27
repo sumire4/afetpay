@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:afetpay/features/auth/presentation/login_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:nfc_manager/nfc_manager.dart';
 import 'package:afetpay/features/wallet/presentation/about_screen.dart';
 
 const _kPrimary = Color(0xFF64819A);
@@ -255,7 +260,8 @@ class _HomeScreenState extends State<HomeScreen>
   final double _balance = 1250.75;
   final String _userName = 'Mete Gedik';
   final String _walletId = 'AY•4821';
-  final bool _isOffline = true;
+  bool _isOffline = false;
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
 
   final List<TransactionItem> _transactions = [
     TransactionItem(
@@ -302,10 +308,32 @@ class _HomeScreenState extends State<HomeScreen>
     _pulseAnimation = Tween<double>(begin: 0.85, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+    _initConnectivity();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
+  }
+
+  Future<void> _initConnectivity() async {
+    late List<ConnectivityResult> result;
+    try {
+      result = await Connectivity().checkConnectivity();
+    } on PlatformException catch (_) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    return _updateConnectionStatus(result);
+  }
+
+  void _updateConnectionStatus(List<ConnectivityResult> result) {
+    setState(() {
+      _isOffline = result.contains(ConnectivityResult.none) || result.isEmpty;
+    });
   }
 
   @override
   void dispose() {
+    _connectivitySubscription.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -393,11 +421,11 @@ class _HomeScreenState extends State<HomeScreen>
       child: Row(
         children: [
           IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.notifications_outlined),
+            onPressed: () => _showProfileSheet(context),
+            icon: const Icon(Icons.account_circle_outlined),
             color: _kOnSurfaceVariant,
           ),
-          Expanded(
+          const Expanded(
             child: Center(
               child: Text(
                 'AfetPay',
@@ -411,11 +439,94 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.settings_outlined),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const AboutScreen()),
+              );
+            },
+            icon: const Icon(Icons.info_outline_rounded),
             color: _kOnSurfaceVariant,
           ),
         ],
+      ),
+    );
+  }
+
+  void _showProfileSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => Container(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 40),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 32),
+            Container(
+              width: 80, height: 80,
+              decoration: BoxDecoration(
+                color: _kPrimary.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.person, size: 40, color: _kPrimary),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Mete Gedik',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: _kOnSurface,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Cüzdan No: AY•4821',
+              style: TextStyle(color: _kOnSurfaceVariant, fontSize: 14),
+            ),
+            const SizedBox(height: 32),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.remove('is_logged_in');
+                  if (!context.mounted) return;
+                  Navigator.pushAndRemoveUntil(
+                    context,
+                    MaterialPageRoute(builder: (_) => const LoginScreen()),
+                    (route) => false,
+                  );
+                },
+                icon: const Icon(Icons.logout_rounded, color: _kError),
+                label: const Text(
+                  'Çıkış Yap',
+                  style: TextStyle(color: _kError, fontWeight: FontWeight.bold),
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  side: const BorderSide(color: _kError),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -916,6 +1027,81 @@ class _TransferSheetState extends State<_TransferSheet>
   bool get _isNfc => widget.method == TransferMethod.nfc;
   bool get _isQr => widget.method == TransferMethod.qr;
 
+  Future<void> _handleNfcTransfer() async {
+    final amountText = _amountCtrl.text.replaceAll(',', '.');
+    final amount = double.tryParse(amountText) ?? 0.0;
+    
+    if (amount <= 0 && widget.isSend) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Lütfen geçerli bir tutar girin')),
+      );
+      return;
+    }
+
+    try {
+      bool isAvailable = await NfcManager.instance.isAvailable();
+      if (!isAvailable) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('NFC bu cihazda desteklenmiyor veya kapalı.')),
+        );
+        return;
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cihazınızı diğer cihaza yaklaştırın...')),
+      );
+
+      NfcManager.instance.startSession(
+        onDiscovered: (NfcTag tag) async {
+          NfcManager.instance.stopSession();
+          _showSuccessDialog(amount);
+        },
+      );
+    } catch (e) {
+      NfcManager.instance.stopSession();
+    }
+  }
+
+  void _showSuccessDialog(double amount) {
+    if (!mounted) return;
+    Navigator.pop(context);
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.check_circle_rounded, color: Colors.green),
+            ),
+            const SizedBox(width: 12),
+            const Text('Başarılı'),
+          ],
+        ),
+        content: Text(
+          widget.isSend 
+              ? '₺${amount.toStringAsFixed(2)} tutarındaki transferiniz başarıyla karşı cihaza aktarıldı.'
+              : 'Karşı cihazdan ₺${amount.toStringAsFixed(2)} başarıyla alındı.',
+          style: const TextStyle(fontSize: 15),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Tamam'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = widget.isSend ? _kPrimary : _kSecondary;
@@ -1181,9 +1367,13 @@ class _TransferSheetState extends State<_TransferSheet>
             SizedBox(
               width: double.infinity,
               child: FilledButton(
-                onPressed: () {
+                onPressed: () async {
                   HapticFeedback.mediumImpact();
-                  Navigator.pop(context);
+                  if (_isNfc) {
+                    await _handleNfcTransfer();
+                  } else {
+                    Navigator.pop(context);
+                  }
                 },
                 style: FilledButton.styleFrom(
                   backgroundColor: activeColor,
