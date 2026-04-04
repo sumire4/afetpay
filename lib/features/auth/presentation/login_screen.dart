@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../wallet/presentation/home_screen.dart';
+import 'package:afetpay/core/crypto_service.dart';
+
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -48,6 +50,7 @@ class _LoginScreenState extends State<LoginScreen> {
       context,
       MaterialPageRoute(builder: (_) => const HomeScreen()),
     );
+    await CryptoService.instance.getOrCreateKeyPair();
   }
 
   @override

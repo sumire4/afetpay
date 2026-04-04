@@ -10,6 +10,7 @@ import 'package:afetpay/features/wallet/presentation/about_screen.dart';
 import 'package:afetpay/core/wallet_service.dart';
 import 'package:afetpay/core/nfc_service.dart';
 import 'package:uuid/uuid.dart';
+import 'package:afetpay/core/crypto_service.dart';
 
 const _kPrimary = Color(0xFF64819A);
 const _kOnPrimary = Color(0xFFFFFFFF);
@@ -537,6 +538,7 @@ class _HomeScreenState extends State<HomeScreen>
                 onPressed: () async {
                   final prefs = await SharedPreferences.getInstance();
                   await prefs.remove('is_logged_in');
+                  await CryptoService.instance.clearKeys();
                   if (!context.mounted) return;
                   Navigator.pushAndRemoveUntil(
                     context,
@@ -984,9 +986,10 @@ class _TransferSheetState extends State<_TransferSheet>
         (await SharedPreferences.getInstance()).getString('wallet_id') ??
             'AY•0000';
     final note =
-        _noteCtrl.text.trim().isEmpty ? 'NFC Transferi' : _noteCtrl.text.trim();
+    _noteCtrl.text.trim().isEmpty ? 'NFC Transferi' : _noteCtrl.text.trim();
 
-    final ndefMsg = NfcService.buildTransferMessage(
+    // ✅ Ed25519 imzalı NDEF mesajı oluştur (async)
+    final ndefMsg = await NfcService.buildTransferMessage(
       amount: amount,
       txId: txId,
       fromWalletId: walletId,
@@ -1001,7 +1004,8 @@ class _TransferSheetState extends State<_TransferSheet>
         try {
           final ndef = Ndef.from(tag);
           if (ndef == null || !ndef.isWritable) {
-            await NfcManager.instance.stopSession(errorMessage: 'Tag yazılabilir değil');
+            await NfcManager.instance
+                .stopSession(errorMessage: 'Tag yazılabilir değil');
             if (!mounted) return;
             setState(() => _nfcActive = false);
             _showSnack('NFC tag yazılabilir değil, farklı bir tag deneyin');
@@ -1010,7 +1014,6 @@ class _TransferSheetState extends State<_TransferSheet>
           await ndef.write(ndefMsg);
           await NfcManager.instance.stopSession();
 
-          // Bakiyeyi düşür ve işlemi kaydet
           final newBalance = balance - amount;
           await WalletService.instance.saveBalance(newBalance);
           await WalletService.instance.addTransaction(TransactionRecord(
@@ -1036,7 +1039,7 @@ class _TransferSheetState extends State<_TransferSheet>
     );
   }
 
-  // ── AL ──────────────────────────────────────
+// ── AL ──────────────────────────────────────
   Future<void> _handleNfcReceive() async {
     final isAvailable = await NfcManager.instance.isAvailable();
     if (!isAvailable) {
@@ -1052,7 +1055,8 @@ class _TransferSheetState extends State<_TransferSheet>
         try {
           final ndef = Ndef.from(tag);
           if (ndef == null) {
-            await NfcManager.instance.stopSession(errorMessage: 'NDEF desteklenmiyor');
+            await NfcManager.instance
+                .stopSession(errorMessage: 'NDEF desteklenmiyor');
             if (!mounted) return;
             setState(() => _nfcActive = false);
             _showSnack('Bu tag AfetPay transferi içermiyor');
@@ -1060,16 +1064,31 @@ class _TransferSheetState extends State<_TransferSheet>
           }
 
           final message = await ndef.read();
-          final params = NfcService.parseTransferMessage(message);
 
-          if (params == null) {
-            await NfcManager.instance.stopSession(errorMessage: 'Geçersiz mesaj');
+          // ✅ İmza doğrulamalı parse
+          final result =
+          await NfcService.parseAndVerifyTransferMessage(message);
+
+          if (!result.isValid) {
+            await NfcManager.instance
+                .stopSession(errorMessage: 'Geçersiz mesaj');
             if (!mounted) return;
             setState(() => _nfcActive = false);
-            _showSnack('Bu tag AfetPay transfer verisi içermiyor');
+
+            // Kullanıcıya net hata mesajı
+            switch (result.status) {
+              case NfcParseStatus.invalidSignature:
+                _showSnack(
+                    '⚠️ İmza doğrulanamadı — transfer reddedildi');
+              case NfcParseStatus.notAfetPay:
+                _showSnack('Bu tag AfetPay transfer verisi içermiyor');
+              case NfcParseStatus.valid:
+                break;
+            }
             return;
           }
 
+          final params = result.params!;
           final txId = params['txId']!;
           final amount = double.tryParse(params['amount']!) ?? 0.0;
           final fromId = params['from'] ?? 'Bilinmeyen';
