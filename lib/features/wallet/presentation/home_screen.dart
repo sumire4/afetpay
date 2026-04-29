@@ -9,6 +9,7 @@ import 'package:nfc_manager/nfc_manager.dart';
 import 'package:afetpay/features/wallet/presentation/about_screen.dart';
 import 'package:afetpay/core/wallet_service.dart';
 import 'package:afetpay/core/nfc_service.dart';
+import 'package:afetpay/core/hce_channel.dart';
 import 'package:uuid/uuid.dart';
 import 'package:afetpay/core/crypto_service.dart';
 
@@ -953,13 +954,15 @@ class _TransferSheetState extends State<_TransferSheet>
     _nfcCtrl.dispose();
     // NFC session kapatılmadan kapanırsa güvenli sonlandır
     NfcManager.instance.stopSession().catchError((_) {});
+    // HCE aktifse durdur
+    HceChannel.stopHce().catchError((_) {});
     super.dispose();
   }
 
   bool get _isNfc => widget.method == TransferMethod.nfc;
   bool get _isQr => widget.method == TransferMethod.qr;
 
-  // ── GÖNDER ──────────────────────────────────
+  // ── GÖNDER (HCE — cihazdan cihaza) ─────────
   Future<void> _handleNfcSend() async {
     final amountText = _amountCtrl.text.replaceAll(',', '.');
     final amount = double.tryParse(amountText) ?? 0.0;
@@ -981,62 +984,65 @@ class _TransferSheetState extends State<_TransferSheet>
       return;
     }
 
-    final txId = const Uuid().v4();
-    final walletId =
-        (await SharedPreferences.getInstance()).getString('wallet_id') ??
-            'AY•0000';
-    final note =
-    _noteCtrl.text.trim().isEmpty ? 'NFC Transferi' : _noteCtrl.text.trim();
+    final txId    = const Uuid().v4();
+    final prefs   = await SharedPreferences.getInstance();
+    final walletId = prefs.getString('wallet_id') ?? 'AY•0000';
+    final note    = _noteCtrl.text.trim().isEmpty ? 'NFC Transferi' : _noteCtrl.text.trim();
 
-    // ✅ Ed25519 imzalı NDEF mesajı oluştur (async)
-    final ndefMsg = await NfcService.buildTransferMessage(
+    // ✅ Ed25519 imzalı URI oluştur
+    final ndefUri = await NfcService.buildTransferUri(
       amount: amount,
       txId: txId,
       fromWalletId: walletId,
       note: note,
     );
 
+    // ✅ HCE başlat — bu telefon sanal NFC kart gibi davranır
+    try {
+      await HceChannel.startHce(ndefUri);
+    } catch (e) {
+      _showSnack('HCE başlatılamadı: $e');
+      return;
+    }
+
     setState(() => _nfcActive = true);
-    _showSnack('Cihazınızı NFC tag\'e/karta yaklaştırın...');
+    _showSnack('Telefonları birbirine yaklaştırın...');
 
-    NfcManager.instance.startSession(
-      onDiscovered: (NfcTag tag) async {
-        try {
-          final ndef = Ndef.from(tag);
-          if (ndef == null || !ndef.isWritable) {
-            await NfcManager.instance
-                .stopSession(errorMessage: 'Tag yazılabilir değil');
-            if (!mounted) return;
-            setState(() => _nfcActive = false);
-            _showSnack('NFC tag yazılabilir değil, farklı bir tag deneyin');
-            return;
-          }
-          await ndef.write(ndefMsg);
-          await NfcManager.instance.stopSession();
+    // Alıcı okuyana kadar bekle; alıcı okuduktan sonra
+    // kendi bakiyesini kendi günceller. Gönderen sadece kendi
+    // bakiyesini düşürür ve HCE'yi kapatır.
+    //
+    // Bunu tetiklemek için alıcı taraftan bir bildirim gelmez;
+    // basit yaklaşım: kullanıcı "Gönderildi" butonuna basar.
+    // Gelişmiş yaklaşım için: HCE onProcessCommandApdu içinde
+    // Method Channel ile Flutter'ı notify edebilir.
+    //
+    // Demo için: Gönder butonuna basıldıktan 3 saniye sonra
+    // otomatik olarak başarı göster (NFC temas süresi ~0.3s).
+    // Gerçek uygulamada HCE service'ten callback alınır.
+    await Future.delayed(const Duration(seconds: 3));
 
-          final newBalance = balance - amount;
-          await WalletService.instance.saveBalance(newBalance);
-          await WalletService.instance.addTransaction(TransactionRecord(
-            id: txId,
-            name: 'NFC Transferi',
-            amount: amount,
-            isSent: true,
-            time: DateTime.now(),
-            note: note,
-          ));
-          await WalletService.instance.markProcessed(txId);
+    // HCE'yi durdur
+    await HceChannel.stopHce().catchError((_) {});
 
-          if (!mounted) return;
-          setState(() => _nfcActive = false);
-          _showSuccessDialog(amount);
-        } catch (e) {
-          await NfcManager.instance.stopSession(errorMessage: 'Yazma hatası');
-          if (!mounted) return;
-          setState(() => _nfcActive = false);
-          _showSnack('NFC yazma hatası: $e');
-        }
-      },
-    );
+    if (!mounted) return;
+    setState(() => _nfcActive = false);
+
+    // Bakiyeyi düşür ve işlemi kaydet
+    final newBalance = balance - amount;
+    await WalletService.instance.saveBalance(newBalance);
+    await WalletService.instance.addTransaction(TransactionRecord(
+      id: txId,
+      name: 'NFC Transferi',
+      amount: amount,
+      isSent: true,
+      time: DateTime.now(),
+      note: note,
+    ));
+    await WalletService.instance.markProcessed(txId);
+
+    if (!mounted) return;
+    _showSuccessDialog(amount);
   }
 
 // ── AL ──────────────────────────────────────

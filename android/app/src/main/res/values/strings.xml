@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AfetPay</string>
+    <string name="hce_service_description">AfetPay NFC Transfer</string>
+    <string name="hce_aid_description">AfetPay P2P Ödeme</string>
+</resources>

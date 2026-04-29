@@ -1,6 +1,6 @@
 name: afetpay
 description: "A new Flutter project."
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
 version: 1.0.0+1
 
 environment:
@@ -9,8 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  nfc_manager:
-  uuid:
+  nfc_manager: ^3.5.0
+  uuid: ^4.5.1
 
   cryptography: ^2.9.0
   cupertino_icons: ^1.0.8

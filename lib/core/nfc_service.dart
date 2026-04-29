@@ -17,20 +17,43 @@ class NfcService {
 
   static const _scheme = 'afetpay://transfer';
 
-  /// Gönderici NDEF mesajı oluşturur (imzalı).
+  /// Gönderici NDEF mesajı oluşturur (imzalı) — NFC tag yazımı için.
   static Future<NdefMessage> buildTransferMessage({
     required double amount,
     required String txId,
     required String fromWalletId,
     String note = '',
   }) async {
-    // İmzalanacak kanonik veri — sıra değişmemeli
+    final uri = await buildTransferUri(
+      amount: amount,
+      txId: txId,
+      fromWalletId: fromWalletId,
+      note: note,
+    );
+    final payload = _encodeTextRecord(uri);
+    return NdefMessage([
+      NdefRecord(
+        typeNameFormat: NdefTypeNameFormat.nfcWellknown,
+        type: Uint8List.fromList([0x54]), // 'T' — Text record
+        identifier: Uint8List(0),
+        payload: payload,
+      )
+    ]);
+  }
+
+  /// İmzalı transfer URI'sini döner — HCE (cihazdan cihaza) için kullanılır.
+  /// NdefMessage yerine ham string döner; native Kotlin servisi encode eder.
+  static Future<String> buildTransferUri({
+    required double amount,
+    required String txId,
+    required String fromWalletId,
+    String note = '',
+  }) async {
     final signingData = _buildSigningData(
       txId: txId,
       amount: amount,
       fromWalletId: fromWalletId,
     );
-
     final signature = await CryptoService.instance.sign(signingData);
     final publicKey = await CryptoService.instance.getPublicKeyBase64();
 
@@ -42,16 +65,7 @@ class NfcService {
       'sig': signature,
       'pk': publicKey,
     });
-
-    final payload = _encodeTextRecord(uri.toString());
-    return NdefMessage([
-      NdefRecord(
-        typeNameFormat: NdefTypeNameFormat.nfcWellknown,
-        type: Uint8List.fromList([0x54]), // 'T' — Text record
-        identifier: Uint8List(0),
-        payload: payload,
-      )
-    ]);
+    return uri.toString();
   }
 
   /// NFC Tag'den okunan NDEF mesajını parse eder.
